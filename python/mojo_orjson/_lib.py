@@ -12,6 +12,10 @@ LIB = os.path.join(ROOT, "dist", "libmojo-orjson.so")
 I = ctypes.c_int64
 _SIGNATURES = {
     "morj_tokenize": ([I, I, I, I, I, I], I),
+    "morj_validate": ([I, I], I),
+    "morj_stdlib_compatible": ([I, I], I),
+    "morj_string_size": ([I, I], I),
+    "morj_write_string": ([I, I, I, I], I),
     "morj_serialized_size": ([I, I, I], I),
     "morj_serialize": ([I, I, I, I, I], I),
 }
@@ -19,6 +23,9 @@ _lib: ctypes.CDLL | None = None
 _pybytes_as_string = ctypes.pythonapi.PyBytes_AsString
 _pybytes_as_string.argtypes = [ctypes.py_object]
 _pybytes_as_string.restype = ctypes.c_void_p
+_pybytes_from_size = ctypes.pythonapi.PyBytes_FromStringAndSize
+_pybytes_from_size.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t]
+_pybytes_from_size.restype = ctypes.py_object
 
 
 class BuildError(RuntimeError):
@@ -74,20 +81,46 @@ def tokenize(data: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     return kinds, starts, ends, count
 
 
+def validate(data: bytes) -> int:
+    return lib().morj_validate(_pybytes_as_string(data), len(data))
+
+
+def stdlib_compatible(data: bytes) -> bool:
+    return bool(lib().morj_stdlib_compatible(_pybytes_as_string(data), len(data)))
+
+
+def serialize_string(data: bytes) -> bytes:
+    library = lib()
+    source = _pybytes_as_string(data)
+    size = library.morj_string_size(source, len(data))
+    if size < 0:
+        raise RuntimeError("serializer rejected string")
+    destination = _pybytes_from_size(None, size)
+    written = library.morj_write_string(
+        source,
+        len(data),
+        _pybytes_as_string(destination),
+        size,
+    )
+    if written != size:
+        raise RuntimeError("serializer size mismatch")
+    return destination
+
+
 def serialize(ir: bytearray, indent: bool) -> bytes:
     library = lib()
     ir_address = buffer_address(ir)
     size = library.morj_serialized_size(ir_address, len(ir), int(indent))
     if size < 0:
         raise RuntimeError("serializer rejected invalid instruction buffer")
-    destination = bytearray(max(size, 1))
+    destination = _pybytes_from_size(None, size)
     written = library.morj_serialize(
         ir_address,
         len(ir),
-        buffer_address(destination),
-        len(destination),
+        _pybytes_as_string(destination),
+        size,
         int(indent),
     )
     if written != size:
         raise RuntimeError("serializer size mismatch")
-    return bytes(destination)
+    return destination

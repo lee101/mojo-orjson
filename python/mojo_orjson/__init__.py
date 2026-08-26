@@ -8,7 +8,10 @@ import uuid as _uuid
 from typing import Any, Callable
 
 from ._lib import serialize as _serialize
+from ._lib import serialize_string as _serialize_string
+from ._lib import stdlib_compatible as _stdlib_compatible
 from ._lib import tokenize as _tokenize
+from ._lib import validate as _validate
 
 __version__ = "0.1.0"
 
@@ -29,6 +32,8 @@ OPT_SERIALIZE_UUID = 0
 
 _VALID_OPTIONS = 4095
 _LENGTH_BYTES = tuple(length.to_bytes(8, "little") for length in range(256))
+_LARGE_DOCUMENT = 64 * 1024
+_LARGE_CONTAINER = 4096
 
 
 JSONEncodeError = TypeError
@@ -293,11 +298,77 @@ class _Encoder:
             self._fallback(value)
 
 
+def _stdlib_dumps(value: Any) -> bytes | None:
+    value_type = type(value)
+    if value_type not in (list, tuple, dict) or len(value) < _LARGE_CONTAINER:
+        return None
+    try:
+        data = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        return None
+    if not _stdlib_compatible(data):
+        return None
+    stack = [value]
+    depths = [0]
+    while stack:
+        item = stack.pop()
+        depth = depths.pop()
+        item_type = type(item)
+        if item is None or item_type in (bool, str):
+            continue
+        if item_type is int:
+            if item < -(1 << 63) or item > (1 << 64) - 1:
+                return None
+            continue
+        if item_type is float:
+            if not math.isfinite(item):
+                return None
+            continue
+        if item_type in (list, tuple):
+            if depth > 254:
+                return None
+            next_depth = depth + 1
+            stack.extend(item)
+            depths.extend([next_depth] * len(item))
+            continue
+        if item_type is dict:
+            if depth > 254:
+                return None
+            for key in item:
+                if type(key) is not str:
+                    return None
+            next_depth = depth + 1
+            stack.extend(item.values())
+            depths.extend([next_depth] * len(item))
+            continue
+        return None
+    return data
+
+
 def dumps(obj: Any, /, default: Callable[[Any], Any] | None = None, option: int | None = None) -> bytes:
     if option is None:
         option = 0
     if type(option) is not int or option < 0 or option & ~_VALID_OPTIONS:
         raise JSONEncodeError("Invalid opts")
+    if type(obj) is str:
+        try:
+            result = _serialize_string(obj.encode("utf-8"))
+        except (TypeError, ValueError, OverflowError, UnicodeError) as exc:
+            raise JSONEncodeError(str(exc)) from exc
+        if option & OPT_APPEND_NEWLINE:
+            result += b"\n"
+        return result
+    if option & ~OPT_APPEND_NEWLINE == 0:
+        result = _stdlib_dumps(obj)
+        if result is not None:
+            if option & OPT_APPEND_NEWLINE:
+                result += b"\n"
+            return result
     encoder = _Encoder(default, option)
     try:
         encoder.encode(obj)
@@ -461,6 +532,44 @@ def loads(obj: str | bytes | bytearray | memoryview, /) -> Any:
         raise JSONDecodeError("Input must be bytes, bytearray, memoryview, or str", "", 0)
     if data.startswith(b"\xef\xbb\xbf"):
         raise JSONDecodeError("unexpected UTF-8 BOM", data.decode("utf-8", "replace"), 0)
+    if len(data) >= _LARGE_DOCUMENT:
+        status = _validate(data)
+        if status < 0:
+            pos = min(-status - 1, len(data))
+            raise JSONDecodeError("unexpected character", data.decode("utf-8", "replace"), pos)
+        try:
+            value = json.loads(data)
+        except (ValueError, UnicodeError) as exc:
+            pos = getattr(exc, "pos", 0)
+            raise JSONDecodeError(
+                "unexpected character", data.decode("utf-8", "replace"), pos
+            ) from exc
+        validate_strings = b"\\u" in data
+        if status or validate_strings:
+            stack = [value]
+            while stack:
+                item = stack.pop()
+                item_type = type(item)
+                if status and item_type is float and not math.isfinite(item):
+                    raise JSONDecodeError(
+                        "number is infinity when parsed as double",
+                        data.decode("utf-8", "replace"),
+                        0,
+                    )
+                if validate_strings and item_type is str:
+                    try:
+                        item.encode("utf-8")
+                    except UnicodeEncodeError as exc:
+                        raise JSONDecodeError(
+                            "invalid string", data.decode("utf-8", "replace"), 0
+                        ) from exc
+                elif item_type is list:
+                    stack.extend(item)
+                elif item_type is dict:
+                    stack.extend(item.values())
+                    if validate_strings:
+                        stack.extend(item.keys())
+        return value
     kinds, starts, ends, count = _tokenize(data)
     if count < 0:
         pos = min(-count - 1, len(data))

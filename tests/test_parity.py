@@ -343,6 +343,43 @@ def test_simd_string_boundaries_and_scalar_tails(length):
         assert mojo.loads(encoded) == value
 
 
+def test_simd_resumes_after_an_early_escape():
+    value = '"' + "a" * 4097 + "\\" + "b" * 35
+    assert mojo.dumps(value) == orjson.dumps(value)
+
+
+def test_large_builtin_dump_path_and_guarded_fallbacks():
+    values = [{"index": index, "value": index * 0.125} for index in range(4096)]
+    assert mojo.dumps(values) == orjson.dumps(values)
+
+    exponent_values = [1e-5] * 4096
+    assert mojo.dumps(exponent_values) == orjson.dumps(exponent_values)
+
+    invalid_keys = [{1: "value"}] * 4096
+    with pytest.raises(mojo.JSONEncodeError):
+        mojo.dumps(invalid_keys)
+    with pytest.raises(orjson.JSONEncodeError):
+        orjson.dumps(invalid_keys)
+
+
+def test_large_document_validation_path_checks_risky_values():
+    valid = orjson.dumps([index * 0.125 for index in range(10_000)])
+    assert len(valid) > 64 * 1024
+    assert mojo.loads(valid) == orjson.loads(valid)
+
+    overflow = b"[" + b"0," * 33_000 + b"1e400]"
+    with pytest.raises(mojo.JSONDecodeError):
+        mojo.loads(overflow)
+    with pytest.raises(orjson.JSONDecodeError):
+        orjson.loads(overflow)
+
+    lone_surrogate = b"[" + b'"plain",' * 10_000 + b'"\\ud800"]'
+    with pytest.raises(mojo.JSONDecodeError):
+        mojo.loads(lone_surrogate)
+    with pytest.raises(orjson.JSONDecodeError):
+        orjson.loads(lone_surrogate)
+
+
 def test_flat_number_sequence_fast_path_preserves_range_errors():
     document = b"[1e400]"
     with pytest.raises(mojo.JSONDecodeError):

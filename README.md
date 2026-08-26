@@ -27,7 +27,7 @@ Mojo byte kernel is competitive on large contiguous strings.
   `OPT_PASSTHROUGH_DATETIME`, `OPT_PASSTHROUGH_SUBCLASS`,
   `OPT_SERIALIZE_NUMPY`, `OPT_SORT_KEYS`, `OPT_STRICT_INTEGER`, and `OPT_UTC_Z`
 
-The 98-test suite compares results and serialized bytes directly with upstream
+The 101-test suite compares results and serialized bytes directly with upstream
 `orjson` 3.11.9. It includes valid and invalid JSON, nested documents, options,
 timestamps, dataclasses, fragments, NumPy values, numeric limits, and a 10,000-row
 round trip. SIMD-width boundaries, scalar tails, dense escape expansion, and the
@@ -77,16 +77,16 @@ PY
 ## Benchmark
 
 Measured with `pixi run bench` on an Intel Xeon E5-2697 v4 at 2.30 GHz,
-Python 3.13.14, Mojo `1.0.0b3.dev2026072406`, and orjson 3.11.9. Values are the
+Python 3.13.14, Mojo `1.1.0.dev2026081105`, and orjson 3.11.9. Values are the
 median of five warm runs. A relative value below `1.00x` means `mojo-orjson` is
 slower.
 
 | Case | mojo-orjson | orjson | Relative |
 |---|---:|---:|---:|
-| dumps 100k records | 996.60 ms | 33.52 ms | 0.03x (slower) |
-| dumps 9 MB ASCII string | 10.40 ms | 12.00 ms | 1.15x (faster) |
-| loads 100k records | 2015.38 ms | 189.40 ms | 0.09x (slower) |
-| loads 500k numbers | 626.62 ms | 39.35 ms | 0.06x (slower) |
+| dumps 100k records | 526.95 ms | 22.31 ms | 0.04x (slower) |
+| dumps 9 MB ASCII string | 4.99 ms | 7.93 ms | 1.59x (faster) |
+| loads 100k records | 251.38 ms | 153.43 ms | 0.61x (slower) |
+| loads 500k numbers | 104.92 ms | 33.85 ms | 0.32x (slower) |
 
 Upstream orjson performs traversal, parsing, and object construction inside one
 mature Rust extension. Here every value crosses a Python loop before or after the
@@ -95,18 +95,21 @@ porting boundary; it does not demonstrate an end-to-end speedup.
 
 ## How it works
 
-For serialization, Python walks the supported object graph into a compact
-instruction buffer. Repeated short strings and dictionary-key instructions are
-cached. Strings remain unescaped UTF-8 payloads and numeric values are canonical
-JSON byte spans. Mojo uses the host SIMD width to classify and copy ordinary string
-runs, with a scalar tail for remainders and escapes. A SIMD sizing pass allows the
-caller to allocate the exact output size before emission.
+For serialization, top-level strings go directly from their UTF-8 buffer through
+the Mojo sizing and emission kernels without an instruction-buffer copy. Large
+built-in containers first use CPython's C encoder, then a Mojo lexical pass accepts
+the result only when its types, ranges, depth, and float spelling are orjson-compatible;
+otherwise serialization falls back to the general path. That path walks the object
+graph into a compact instruction buffer and caches repeated short strings and keys.
+Mojo uses the host SIMD width to classify and copy ordinary string runs, resumes
+SIMD after escapes, and handles the remainder with a scalar tail.
 
 For parsing, UTF-8 JSON bytes pass to a Mojo tokenizer. Its string scanner skips
-host-width runs with SIMD loads and reductions, validates escapes and control
-characters, validates JSON number grammar, and emits caller-owned arrays of token
-kind, start, and end offsets. Python then materializes the token stream into native
-objects, caching repeated decoded strings and specializing flat numeric sequences.
+host-width runs with SIMD loads and reductions and validates escapes, controls,
+number grammar, and integer ranges. Documents of at least 64 KiB use a zero-allocation
+Mojo validation pass followed by CPython's C materializer; only lexically risky
+floats or escaped Unicode require an additional result check. Smaller inputs retain
+the token-array materializer, its decoded-string cache, and flat-number specialization.
 
 The C ABI exports only non-parametric functions. All buffers cross `ctypes` as
 integer addresses with explicit lengths and output capacities and are reconstructed in Mojo as

@@ -82,7 +82,9 @@ def scan_string(src: BPtr, n: Int, start: Int) -> Int:
 
 def scan_number(src: BPtr, n: Int, start: Int) -> Int:
     var i = start
+    var negative = False
     if src[i] == 45:
+        negative = True
         i += 1
         if i >= n:
             return -(i + 1)
@@ -96,13 +98,17 @@ def scan_number(src: BPtr, n: Int, start: Int) -> Int:
             i += 1
     else:
         return -(i + 1)
+    var integer_end = i
+    var is_float = False
     if i < n and src[i] == 46:
+        is_float = True
         i += 1
         if i >= n or not is_digit(src[i]):
             return -(i + 1)
         while i < n and is_digit(src[i]):
             i += 1
     if i < n and (src[i] == 101 or src[i] == 69):
+        is_float = True
         i += 1
         if i < n and (src[i] == 43 or src[i] == 45):
             i += 1
@@ -110,7 +116,56 @@ def scan_number(src: BPtr, n: Int, start: Int) -> Int:
             return -(i + 1)
         while i < n and is_digit(src[i]):
             i += 1
+    if not is_float and not integer_in_range(src, start, integer_end, negative):
+        return -(start + 1)
     return i
+
+
+def integer_in_range(src: BPtr, start: Int, end: Int, negative: Bool) -> Bool:
+    var first = start + Int(negative)
+    var digits = end - first
+    var limit_length = 20
+    comptime POSITIVE_LIMIT = String("18446744073709551615")
+    comptime NEGATIVE_LIMIT = String("9223372036854775808")
+    if negative:
+        limit_length = 19
+    if digits < limit_length:
+        return True
+    if digits > limit_length:
+        return False
+    for j in range(digits):
+        var limit_byte = POSITIVE_LIMIT.unsafe_ptr()[j]
+        if negative:
+            limit_byte = NEGATIVE_LIMIT.unsafe_ptr()[j]
+        if src[first + j] < limit_byte:
+            return True
+        if src[first + j] > limit_byte:
+            return False
+    return True
+
+
+def float_may_overflow(src: BPtr, start: Int, end: Int) -> Bool:
+    var i = start + Int(src[start] == 45)
+    var integer_digits = 0
+    while i < end and is_digit(src[i]):
+        integer_digits += 1
+        i += 1
+    if integer_digits >= 309:
+        return True
+    while i < end and src[i] != 101 and src[i] != 69:
+        i += 1
+    if i == end:
+        return False
+    i += 1
+    if i < end and src[i] == 45:
+        return False
+    if i < end and src[i] == 43:
+        i += 1
+    var exponent = 0
+    while i < end:
+        exponent = min(10000, exponent * 10 + Int(src[i] - 48))
+        i += 1
+    return exponent + integer_digits - 1 >= 308
 
 
 def matches(
@@ -222,6 +277,90 @@ def morj_tokenize(
     return count
 
 
+@export("morj_validate")
+def morj_validate(src_addr: Int, n: Int) abi("C") -> Int:
+    if n < 0 or src_addr == 0:
+        return -1
+    var src = BPtr(unsafe_from_address=src_addr)
+    var i = 0
+    var needs_float_check = False
+    while i < n:
+        var c = src[i]
+        if is_ws(c):
+            i += 1
+            continue
+        if c == 34:
+            var end = scan_string(src, n, i)
+            if end < 0:
+                return end
+            i = end
+        elif c == 123 or c == 125 or c == 91 or c == 93 or c == 44 or c == 58:
+            i += 1
+        elif c == 45 or is_digit(c):
+            var end = scan_number(src, n, i)
+            if end < 0:
+                return end
+            needs_float_check = needs_float_check or float_may_overflow(src, i, end)
+            i = end
+        elif c == 116 and matches(
+            src, n, i, UInt8(116), UInt8(114), UInt8(117), UInt8(101), 4
+        ):
+            i += 4
+        elif c == 102 and matches(
+            src, n, i, UInt8(102), UInt8(97), UInt8(108), UInt8(115), 4
+        ):
+            if i + 5 > n or src[i + 4] != 101:
+                return -(i + 1)
+            i += 5
+        elif c == 110 and matches(
+            src, n, i, UInt8(110), UInt8(117), UInt8(108), UInt8(108), 4
+        ):
+            i += 4
+        else:
+            return -(i + 1)
+    return Int(needs_float_check)
+
+
+@export("morj_stdlib_compatible")
+def morj_stdlib_compatible(src_addr: Int, n: Int) abi("C") -> Int:
+    if n < 0 or src_addr == 0:
+        return 0
+    var src = BPtr(unsafe_from_address=src_addr)
+    var i = 0
+    while i < n:
+        var c = src[i]
+        if is_ws(c) or c == 123 or c == 125 or c == 91 or c == 93 or c == 44 or c == 58:
+            i += 1
+        elif c == 34:
+            var end = scan_string(src, n, i)
+            if end < 0:
+                return 0
+            i = end
+        elif c == 45 or is_digit(c):
+            var end = scan_number(src, n, i)
+            if end < 0:
+                return 0
+            for j in range(i, end):
+                if src[j] == 101 or src[j] == 69:
+                    return 0
+            i = end
+        elif c == 116 and matches(
+            src, n, i, UInt8(116), UInt8(114), UInt8(117), UInt8(101), 4
+        ):
+            i += 4
+        elif c == 102 and i + 5 <= n and matches(
+            src, n, i, UInt8(102), UInt8(97), UInt8(108), UInt8(115), 4
+        ) and src[i + 4] == 101:
+            i += 5
+        elif c == 110 and matches(
+            src, n, i, UInt8(110), UInt8(117), UInt8(108), UInt8(108), 4
+        ):
+            i += 4
+        else:
+            return 0
+    return 1
+
+
 def read_length(src: BPtr, pos: Int) -> Int:
     var value = Int(0)
     for j in range(8):
@@ -242,18 +381,18 @@ def write_indent(dst: BPtr, pos: Int, depth: Int) -> Int:
 def string_size(src: BPtr, start: Int, length: Int) -> Int:
     var size = 2
     var i = 0
-    while i + W <= length:
-        var v = src.load[width=W](start + i)
-        var special = (
-            v.lt(SIMD[DType.uint8, W](32))
-            | v.eq(SIMD[DType.uint8, W](34))
-            | v.eq(SIMD[DType.uint8, W](92))
-        ).reduce_or()
-        if special:
-            break
-        size += W
-        i += W
     while i < length:
+        if i + W <= length:
+            var v = src.load[width=W](start + i)
+            var special = (
+                v.lt(SIMD[DType.uint8, W](32))
+                | v.eq(SIMD[DType.uint8, W](34))
+                | v.eq(SIMD[DType.uint8, W](92))
+            ).reduce_or()
+            if not special:
+                size += W
+                i += W
+                continue
         var c = src[start + i]
         if (
             c == 34
@@ -280,19 +419,19 @@ def write_string(
     dst[p] = UInt8(34)
     p += 1
     var i = 0
-    while i + W <= length:
-        var v = src.load[width=W](start + i)
-        var special = (
-            v.lt(SIMD[DType.uint8, W](32))
-            | v.eq(SIMD[DType.uint8, W](34))
-            | v.eq(SIMD[DType.uint8, W](92))
-        ).reduce_or()
-        if special:
-            break
-        dst.store(p, v)
-        p += W
-        i += W
     while i < length:
+        if i + W <= length:
+            var v = src.load[width=W](start + i)
+            var special = (
+                v.lt(SIMD[DType.uint8, W](32))
+                | v.eq(SIMD[DType.uint8, W](34))
+                | v.eq(SIMD[DType.uint8, W](92))
+            ).reduce_or()
+            if not special:
+                dst.store(p, v)
+                p += W
+                i += W
+                continue
         var c = src[start + i]
         if c == 34 or c == 92:
             dst[p] = UInt8(92)
@@ -334,6 +473,26 @@ def write_string(
         i += 1
     dst[p] = UInt8(34)
     return p + 1
+
+
+@export("morj_string_size")
+def morj_string_size(src_addr: Int, n: Int) abi("C") -> Int:
+    if n < 0 or src_addr == 0:
+        return -1
+    return string_size(BPtr(unsafe_from_address=src_addr), 0, n)
+
+
+@export("morj_write_string")
+def morj_write_string(
+    src_addr: Int, n: Int, dst_addr: Int, dst_capacity: Int
+) abi("C") -> Int:
+    if n < 0 or src_addr == 0 or dst_addr == 0:
+        return -1
+    var src = BPtr(unsafe_from_address=src_addr)
+    var expected = string_size(src, 0, n)
+    if dst_capacity < expected:
+        return -1
+    return write_string(src, 0, n, BPtr(unsafe_from_address=dst_addr), 0)
 
 
 @export("morj_serialized_size")
