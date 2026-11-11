@@ -39,7 +39,7 @@ def scan_string(src: BPtr, n: Int, start: Int) -> Int:
     var i = start + 1
     while i < n:
         if i + W <= n:
-            var v = src.load[width=W](i)
+            var v = src.unsafe_load[width=W](i)
             var special = (
                 v.lt(SIMD[DType.uint8, W](32))
                 | v.eq(SIMD[DType.uint8, W](34))
@@ -383,7 +383,7 @@ def string_size(src: BPtr, start: Int, length: Int) -> Int:
     var i = 0
     while i < length:
         if i + W <= length:
-            var v = src.load[width=W](start + i)
+            var v = src.unsafe_load[width=W](start + i)
             var special = (
                 v.lt(SIMD[DType.uint8, W](32))
                 | v.eq(SIMD[DType.uint8, W](34))
@@ -421,7 +421,7 @@ def write_string(
     var i = 0
     while i < length:
         if i + W <= length:
-            var v = src.load[width=W](start + i)
+            var v = src.unsafe_load[width=W](start + i)
             var special = (
                 v.lt(SIMD[DType.uint8, W](32))
                 | v.eq(SIMD[DType.uint8, W](34))
@@ -610,7 +610,7 @@ def morj_serialize(
             else:
                 var j = 0
                 while j + W <= length:
-                    dst.store(p + j, src.load[width=W](i + j))
+                    dst.store(p + j, src.unsafe_load[width=W](i + j))
                     j += W
                 while j < length:
                     dst[p + j] = src[i + j]
